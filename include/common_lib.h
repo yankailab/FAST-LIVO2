@@ -17,9 +17,51 @@ which is included as part of this source code package.
 #include <utils/types.h>
 #include <utils/color.h>
 #include <opencv2/opencv.hpp>
-#include <sensor_msgs/Imu.h>
+//#include <sensor_msgs/Imu.h>
 #include <sophus/se3.h>
-#include <tf/transform_broadcaster.h>
+//#include <tf/transform_broadcaster.h>
+
+/*
+#ifdef FASTLIVO2_STANDALONE
+  #include "fastlivo2_core/ros1_min_shim.hpp"
+#else
+  #include <sensor_msgs/Imu.h>
+#endif
+*/
+
+// ... keep your normal C++/Eigen/OpenCV/PCL includes above ...
+
+#ifdef FASTLIVO2_STANDALONE
+//  #include "fastlivo2_core/ros_compat.hpp"
+  #include <ros/ros.h>
+  #include <tf/transform_broadcaster.h>
+  #include <tf/transform_datatypes.h>
+  #include <tf/transform_listener.h>
+  #include <sensor_msgs/Imu.h>
+  #include <nav_msgs/Odometry.h>
+  #include <geometry_msgs/PoseStamped.h>
+  #include <visualization_msgs/Marker.h>
+#else
+  #include <ros/ros.h>
+  #include <tf/transform_broadcaster.h>
+  #include <tf/transform_datatypes.h>
+  #include <tf/transform_listener.h>
+
+  #include <sensor_msgs/Imu.h>
+  #include <sensor_msgs/Image.h>
+  #include <sensor_msgs/PointCloud2.h>
+  #include <nav_msgs/Odometry.h>
+  #include <geometry_msgs/PoseStamped.h>
+#endif
+
+
+
+
+
+
+
+
+
 
 using namespace std;
 using namespace Eigen;
