@@ -47,6 +47,15 @@ namespace fastlivo2_core
     bool saveColoredMapPLY(const std::string &path) const;
     bool saveColoredMapPCD(const std::string &path) const;
 
+    // Reset: clear buffers and restart. If clear_map=true, also clears voxel + colored map.
+    void reset(bool clear_map = true);
+    // Get current pose (returns false if not initialized / no frame processed yet)
+    bool getPose(Pose &out) const;
+
+    bool getVelocity(Eigen::Vector3d &out_vel) const;
+    bool getBiases(fastlivo2_core::Biases &out_biases) const;
+    bool getStateDebug(fastlivo2_core::StateDebug &out_dbg) const;
+
   private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

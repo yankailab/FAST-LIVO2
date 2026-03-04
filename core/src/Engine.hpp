@@ -59,6 +59,13 @@ namespace fastlivo2_core
     PointCloudXYZI::Ptr getUndistortedCloud() const { return feats_undistort; }
     const StatesGroup &getState() const { return _state; }
 
+    void reset(bool clear_map = true);
+    bool getPose(fastlivo2_core::Pose &out) const;
+
+    bool getVelocity(Eigen::Vector3d &out_vel) const;
+    bool getBiases(fastlivo2_core::Biases &out_biases) const;
+    bool getStateDebug(fastlivo2_core::StateDebug &out_dbg) const;
+
   private:
     // ======== data buffering ========
     struct LidarItem
@@ -122,7 +129,8 @@ namespace fastlivo2_core
     double lidar_time_offset = 0.0;
 
     // IMU
-    ImuProcess imu_proc_;
+//    ImuProcess imu_proc_;
+    std::unique_ptr<ImuProcess> imu_proc_;
     bool gravity_align_en = false;
     bool gravity_align_finished = false;
 
@@ -153,6 +161,9 @@ namespace fastlivo2_core
     static sensor_msgs::Imu::ConstPtr makeImuMsg(const ImuSample &s);
     static PointCloudXYZI::Ptr makeCloud(const LidarScan &scan);
     static cv::Mat makeBgrCopy(const ImageFrame &img);
+
+    // Keep a copy of voxel config so we can reconstruct voxelmap_manager on reset
+    VoxelMapConfig voxel_config_;
 
     // Backing voxel map storage (passed by ref into VoxelMapManager ctor)
     std::unordered_map<VOXEL_LOCATION, VoxelOctoTree *> voxel_map_;

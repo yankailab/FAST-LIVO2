@@ -20,16 +20,17 @@ namespace fastlivo2_core
     LidarMeasures.pcl_proc_next.reset(new PointCloudXYZI());
 
     downSizeFilterSurf.setLeafSize(filter_size_surf_min, filter_size_surf_min, filter_size_surf_min);
+
+    imu_proc_ = std::make_unique<ImuProcess>();
   }
 
   bool Engine::init()
   {
     // Build voxelmap + vio manager like in constructor/initializeComponents
     ros::NodeHandle nh; // your stub NodeHandle -> default params
-    VoxelMapConfig voxel_config;
-    loadVoxelConfig(nh, voxel_config);
+    loadVoxelConfig(nh, voxel_config_);
 
-    voxelmap_manager.reset(new VoxelMapManager(voxel_config, voxel_map_));
+    voxelmap_manager.reset(new VoxelMapManager(voxel_config_, voxel_map_));
     vio_manager.reset(new VIOManager());
 
     // set extrinsics into voxelmap_manager and vio_manager like initializeComponents()
@@ -70,8 +71,10 @@ namespace fastlivo2_core
     }
 
     // IMU proc settings (defaults; tune later)
-    imu_proc_.set_extrinsic(extT, extR);
-    imu_proc_.set_inv_expo_cov(inv_expo_cov);
+    if (!imu_proc_)
+      imu_proc_ = std::make_unique<ImuProcess>();
+    imu_proc_->set_extrinsic(extT, extR);
+    imu_proc_->set_inv_expo_cov(inv_expo_cov);
 
     return true;
   }
@@ -144,7 +147,7 @@ namespace fastlivo2_core
         R_il_rowmajor[6], R_il_rowmajor[7], R_il_rowmajor[8];
 
     // Apply to IMU processor immediately
-    imu_proc_.set_extrinsic(extT, extR);
+    imu_proc_->set_extrinsic(extT, extR);
 
     // Apply to voxelmap manager if exists
     if (voxelmap_manager)
@@ -338,7 +341,7 @@ namespace fastlivo2_core
     if (!is_first_frame)
     {
       _first_lidar_time = LidarMeasures.last_lio_update_time;
-      imu_proc_.first_lidar_time = _first_lidar_time; // same behavior as upstream
+      imu_proc_->first_lidar_time = _first_lidar_time; // same behavior as upstream
       is_first_frame = true;
       ROS_INFO("FIRST LIDAR FRAME!");
     }
@@ -346,7 +349,7 @@ namespace fastlivo2_core
 
   void Engine::gravityAlignment()
   {
-    if (!imu_proc_.imu_need_init && !gravity_align_finished)
+    if (!imu_proc_->imu_need_init && !gravity_align_finished)
     {
       V3D ez(0, 0, -1), gz(_state.gravity);
       Eigen::Quaterniond G_q_I0 = Eigen::Quaterniond::FromTwoVectors(gz, ez);
@@ -364,7 +367,7 @@ namespace fastlivo2_core
 
   void Engine::processImu()
   {
-    imu_proc_.Process2(LidarMeasures, _state, feats_undistort);
+    imu_proc_->Process2(LidarMeasures, _state, feats_undistort);
 
     if (gravity_align_en)
       gravityAlignment();
@@ -391,6 +394,177 @@ namespace fastlivo2_core
     default:
       break;
     }
+  }
+
+  bool Engine::getPose(fastlivo2_core::Pose &out) const
+  {
+    std::lock_guard<std::mutex> lk(mtx_);
+
+    if (!is_first_frame)
+      return false;
+
+    out.t = LidarMeasures.last_lio_update_time;
+    out.p = _state.pos_end;
+    out.q = Eigen::Quaterniond(_state.rot_end);
+    out.q.normalize();
+    return true;
+  }
+
+  void Engine::reset(bool clear_map)
+  {
+    std::lock_guard<std::mutex> lk(mtx_);
+
+    // 1) clear incoming buffers
+    imu_buf_.clear();
+    lidar_buf_.clear();
+    img_buf_.clear();
+
+    // 2) clear processing clouds
+    if (feats_undistort)
+      feats_undistort->clear();
+    if (feats_down_body)
+      feats_down_body->clear();
+    if (feats_down_world)
+      feats_down_world->clear();
+    if (pcl_w_wait_pub)
+      pcl_w_wait_pub->clear();
+
+    // 3) reset state and flags
+    _state = StatesGroup(); // default state
+    state_propagat = _state;
+
+    is_first_frame = false;
+    _first_lidar_time = -1.0;
+    gravity_align_finished = false;
+    lidar_map_inited = false;
+
+    // 4) reset LidarMeasures
+    LidarMeasures = LidarMeasureGroup();
+    // Ensure required pointers are allocated (constructor usually does some of this)
+    if (!LidarMeasures.lidar)
+      LidarMeasures.lidar.reset(new PointCloudXYZI());
+    if (!LidarMeasures.pcl_proc_cur)
+      LidarMeasures.pcl_proc_cur.reset(new PointCloudXYZI());
+    if (!LidarMeasures.pcl_proc_next)
+      LidarMeasures.pcl_proc_next.reset(new PointCloudXYZI());
+    LidarMeasures.measures.clear();
+    LidarMeasures.last_lio_update_time = -1.0;
+    LidarMeasures.lio_vio_flg = WAIT;
+
+    // 5) reset / clear maps
+    if (clear_map)
+    {
+      voxel_map_.clear();
+
+      if (colored_map)
+        colored_map->clear();
+      if (colored_frame)
+        colored_frame->clear();
+      if (pcl_wait_pub)
+        pcl_wait_pub->clear();
+
+      pub_num = 0;
+      color_frame_count_ = 0;
+    }
+
+    // 6) re-create managers to ensure internal references match cleared map/state
+    if (voxelmap_manager)
+    {
+      voxelmap_manager.reset(new VoxelMapManager(voxel_config_, voxel_map_));
+      voxelmap_manager->extT_ = extT;
+      voxelmap_manager->extR_ = extR;
+    }
+    if (vio_manager)
+    {
+      vio_manager.reset(new VIOManager());
+
+      // re-apply VIO configuration
+      vio_manager->grid_size = grid_size;
+      vio_manager->patch_size = patch_size;
+      vio_manager->outlier_threshold = outlier_threshold;
+      vio_manager->setImuToLidarExtrinsic(extT, extR);
+      vio_manager->setLidarToCameraExtrinsic(cameraextrinR, cameraextrinT);
+      vio_manager->state = &_state;
+      vio_manager->state_propagat = &state_propagat;
+      vio_manager->max_iterations = max_iterations;
+      vio_manager->img_point_cov = IMG_POINT_COV;
+      vio_manager->normal_en = normal_en;
+      vio_manager->inverse_composition_en = inverse_composition_en;
+      vio_manager->raycast_en = raycast_en;
+      vio_manager->grid_n_width = grid_n_width;
+      vio_manager->grid_n_height = grid_n_height;
+      vio_manager->patch_pyrimid_level = patch_pyrimid_level;
+      vio_manager->exposure_estimate_en = exposure_estimate_en;
+
+      // re-bind camera if available
+      if (cam_owner_)
+      {
+        vio_manager->pinhole_cam = cam_owner_.get();
+        vio_manager->cam = cam_owner_.get();
+        // re-init VIO
+        vio_initialized_ = false;
+        vio_manager->initializeVIO();
+        vio_initialized_ = true;
+      }
+      else
+      {
+        vio_manager->cam = nullptr;
+        vio_manager->pinhole_cam = nullptr;
+        vio_initialized_ = false;
+      }
+    }
+
+    // 7) reset IMU processor (clean internal state), then re-apply settings
+    imu_proc_ = std::make_unique<ImuProcess>();
+    imu_proc_->set_extrinsic(extT, extR);
+    imu_proc_->set_inv_expo_cov(inv_expo_cov);
+  }
+
+  bool Engine::getVelocity(Eigen::Vector3d &out_vel) const
+  {
+    std::lock_guard<std::mutex> lk(mtx_);
+    if (!is_first_frame)
+      return false;
+    out_vel = _state.vel_end;
+    return true;
+  }
+
+  bool Engine::getBiases(fastlivo2_core::Biases &out_biases) const
+  {
+    std::lock_guard<std::mutex> lk(mtx_);
+    if (!is_first_frame)
+      return false;
+    out_biases.gyro = _state.bias_g;
+    out_biases.accel = _state.bias_a;
+    return true;
+  }
+
+  bool Engine::getStateDebug(fastlivo2_core::StateDebug &out_dbg) const
+  {
+    std::lock_guard<std::mutex> lk(mtx_);
+    if (!is_first_frame)
+      return false;
+
+    out_dbg.t = LidarMeasures.last_lio_update_time;
+
+    out_dbg.p = _state.pos_end;
+    out_dbg.q = Eigen::Quaterniond(_state.rot_end);
+    out_dbg.q.normalize();
+    out_dbg.v = _state.vel_end;
+
+    out_dbg.biases.gyro = _state.bias_g;
+    out_dbg.biases.accel = _state.bias_a;
+
+    out_dbg.gravity = _state.gravity;
+    out_dbg.inv_expo_time = _state.inv_expo_time;
+
+    out_dbg.is_first_frame = is_first_frame;
+    out_dbg.lio_vio_flg = int(LidarMeasures.lio_vio_flg);
+
+    // Covariance diagonal (StatesGroup::cov must exist for this; it does in FAST-LIVO2)
+    out_dbg.cov_diag = _state.cov.diagonal();
+
+    return true;
   }
 
   void Engine::transformLidar(const Eigen::Matrix3d rot, const Eigen::Vector3d t,

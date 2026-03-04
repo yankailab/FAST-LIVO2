@@ -92,9 +92,35 @@ namespace fastlivo2_core
   {
     return impl_->engine->saveColoredMapPLY(path);
   }
+
   bool FastLivo2Core::saveColoredMapPCD(const std::string &path) const
   {
     return impl_->engine->saveColoredMapPCD(path);
+  }
+
+  void FastLivo2Core::reset(bool clear_map)
+  {
+    impl_->engine->reset(clear_map);
+  }
+
+  bool FastLivo2Core::getPose(Pose &out) const
+  {
+    return impl_->engine->getPose(out);
+  }
+
+  bool FastLivo2Core::getVelocity(Eigen::Vector3d &out_vel) const
+  {
+    return impl_->engine->getVelocity(out_vel);
+  }
+
+  bool FastLivo2Core::getBiases(fastlivo2_core::Biases &out_biases) const
+  {
+    return impl_->engine->getBiases(out_biases);
+  }
+
+  bool FastLivo2Core::getStateDebug(fastlivo2_core::StateDebug &out_dbg) const
+  {
+    return impl_->engine->getStateDebug(out_dbg);
   }
 
 } // namespace fastlivo2_core
