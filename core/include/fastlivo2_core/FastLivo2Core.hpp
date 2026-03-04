@@ -20,6 +20,8 @@ namespace fastlivo2_core
     // Init from a YAML path (we'll wire it up in phase 2)
     bool init(const std::string &yaml_path);
 
+    void setImageEnabled(bool en);
+
     bool setCameraPinhole(int width, int height, double fx, double fy, double cx, double cy);
     bool setCameraPinholeDistorted(int width, int height,
                                    double fx, double fy, double cx, double cy,

@@ -123,4 +123,9 @@ namespace fastlivo2_core
     return impl_->engine->getStateDebug(out_dbg);
   }
 
+  void FastLivo2Core::setImageEnabled(bool en)
+  {
+    impl_->engine->setImageEnabled(en);
+  }
+
 } // namespace fastlivo2_core

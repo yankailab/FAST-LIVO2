@@ -253,6 +253,48 @@ namespace fastlivo2_core
         return false;
     }
 
+    // If no images are used, always produce LIO measurements
+    if (!img_enabled_)
+    {
+      // behave like ONLY_LIO: consume one lidar scan + imu up to scan end
+      if (lidar_buf_.empty())
+        return false;
+
+      const auto lidar = lidar_buf_.front();
+      const double t0 = lidar.t0;
+      const double t1 = lidar.t1;
+      if (imu_buf_.empty())
+        return false;
+      if (imu_buf_.back()->header.stamp.toSec() < t1)
+        return false;
+
+      meas.lidar = lidar.cloud;
+      meas.lidar_frame_beg_time = t0;
+      meas.lidar_frame_end_time = t1;
+      meas.pcl_proc_cur = meas.lidar;
+
+      MeasureGroup m;
+      m.imu.clear();
+      m.lio_time = t1;
+
+      while (!imu_buf_.empty())
+      {
+        if (imu_buf_.front()->header.stamp.toSec() > t1)
+          break;
+        if (imu_buf_.front()->header.stamp.toSec() > meas.last_lio_update_time)
+          m.imu.push_back(imu_buf_.front());
+        imu_buf_.pop_front();
+      }
+
+      meas.measures.clear();
+      meas.measures.push_back(m);
+      meas.lio_vio_flg = LIO;
+      meas.last_lio_update_time = t1;
+
+      lidar_buf_.pop_front();
+      return true;
+    }
+
     // Alternate: WAIT/VIO -> produce LIO ; LIO -> produce VIO
     const EKF_STATE last_flg = meas.lio_vio_flg;
 

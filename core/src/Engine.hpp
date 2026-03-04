@@ -29,6 +29,10 @@ namespace fastlivo2_core
 
     bool init();
 
+    void setImageEnabled(bool en)
+    {
+      img_enabled_ = en;
+    };
     bool setCameraPinhole(int width, int height, double fx, double fy, double cx, double cy);
     bool setCameraPinholeDistorted(int width, int height,
                                    double fx, double fy, double cx, double cy,
@@ -41,10 +45,9 @@ namespace fastlivo2_core
 
     void pushImu(const ImuSample &s);
     void pushLidar(const LidarScan &s);
-    void pushImage(const ImageFrame &img); // optional for later
+    void pushImage(const ImageFrame &img);
 
     // Build one synced LidarMeasureGroup (like LIVMapper::sync_packages).
-    //  bool sync_packages(LidarMeasureGroup& out);
     bool spinOnce();
 
     bool configureColoredMapMaintenance(int downsample_every_n_frames,
@@ -129,7 +132,6 @@ namespace fastlivo2_core
     double lidar_time_offset = 0.0;
 
     // IMU
-//    ImuProcess imu_proc_;
     std::unique_ptr<ImuProcess> imu_proc_;
     bool gravity_align_en = false;
     bool gravity_align_finished = false;
@@ -191,6 +193,8 @@ namespace fastlivo2_core
     uint64_t color_frame_count_ = 0;      // increments when a colored frame is produced
 
     void maintainColoredMap_();
+
+    bool img_enabled_ = false;
   };
 
 } // namespace fastlivo2_core
