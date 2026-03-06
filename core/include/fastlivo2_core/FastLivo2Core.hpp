@@ -1,6 +1,8 @@
 #pragma once
 #include "fastlivo2_core/Export.hpp"
 #include "fastlivo2_core/Types.hpp"
+#include <pcl/point_types.h>
+#include <pcl/point_cloud.h>
 #include <memory>
 #include <string>
 #include <array>
@@ -45,6 +47,9 @@ namespace fastlivo2_core
     // Outputs
     Eigen::Isometry3d T_wb() const; // pose world<-body
     std::vector<ColoredPoint> getColoredMap() const;
+
+    // Return a snapshot of the LiDAR map (works even without images)
+    pcl::PointCloud<pcl::PointXYZI>::Ptr getMap() const;
 
     bool saveColoredMapPLY(const std::string &path) const;
     bool saveColoredMapPCD(const std::string &path) const;

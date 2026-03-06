@@ -80,6 +80,11 @@ namespace fastlivo2_core
     return impl_->colored_map;
   }
 
+  pcl::PointCloud<pcl::PointXYZI>::Ptr FastLivo2Core::getMap() const
+  {
+    return impl_->engine->getMap();
+  }
+
   bool FastLivo2Core::configureColoredMapMaintenance(int downsample_every_n_frames,
                                                      size_t max_map_points,
                                                      double voxel_leaf_size_m)

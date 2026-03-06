@@ -54,6 +54,9 @@ namespace fastlivo2_core
                                         size_t max_map_points,
                                         double voxel_leaf_size_m);
 
+    // Return a snapshot of the LiDAR map (works even without images)
+    pcl::PointCloud<pcl::PointXYZI>::Ptr getMap() const;
+
     PointCloudXYZRGB::Ptr getColoredMap() const { return colored_map; }
     PointCloudXYZRGB::Ptr getColoredFrame() const { return colored_frame; }
     bool saveColoredMapPLY(const std::string &path) const;
@@ -195,6 +198,15 @@ namespace fastlivo2_core
     void maintainColoredMap_();
 
     bool img_enabled_ = false;
+
+    // map
+    mutable std::mutex map_mtx_;
+    pcl::PointCloud<pcl::PointXYZI>::Ptr map_xyz_i_{new pcl::PointCloud<pcl::PointXYZI>};
+
+    int map_ds_every_n_ = 0;      // 0 disables
+    size_t map_max_points_ = 0;   // 0 disables
+    float map_voxel_leaf_ = 0.0f; // <=0 disables
+    uint64_t map_frame_count_ = 0;
   };
 
 } // namespace fastlivo2_core

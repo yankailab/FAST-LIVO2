@@ -22,6 +22,8 @@ namespace fastlivo2_core
     downSizeFilterSurf.setLeafSize(filter_size_surf_min, filter_size_surf_min, filter_size_surf_min);
 
     imu_proc_ = std::make_unique<ImuProcess>();
+
+    map_xyz_i_.reset(new pcl::PointCloud<pcl::PointXYZI>());
   }
 
   bool Engine::init()
@@ -507,6 +509,14 @@ namespace fastlivo2_core
 
       pub_num = 0;
       color_frame_count_ = 0;
+
+      // uncolored map
+      {
+        std::lock_guard<std::mutex> lk(map_mtx_);
+        if (map_xyz_i_)
+          map_xyz_i_->clear();
+        map_frame_count_ = 0;
+      }
     }
 
     // 6) re-create managers to ensure internal references match cleared map/state
@@ -701,6 +711,55 @@ namespace fastlivo2_core
       RGBpointBodyToWorld(&laserCloudFullRes->points[i], &laserCloudWorld->points[i]);
     }
     *pcl_w_wait_pub = *laserCloudWorld;
+
+    // ---- Export LiDAR-only map for external API (works without images) ----
+    {
+      std::lock_guard<std::mutex> lk(map_mtx_);
+
+      // Append the points you just integrated (downsampled world points)
+      map_xyz_i_->points.reserve(map_xyz_i_->points.size() + world_lidar->size());
+      for (const auto &s : world_lidar->points)
+      {
+        pcl::PointXYZI p;
+        p.x = s.x;
+        p.y = s.y;
+        p.z = s.z;
+        p.intensity = s.intensity;
+        map_xyz_i_->points.push_back(p);
+      }
+      map_xyz_i_->width = (uint32_t)map_xyz_i_->points.size();
+      map_xyz_i_->height = 1;
+      map_xyz_i_->is_dense = false;
+
+      // Optional: hard cap (keep newest tail)
+      //       if (map_max_points_ > 0 && map_xyz_i_->size() > map_max_points_)
+      //       {
+      //         const size_t keep = map_max_points_;
+      //         pcl::PointCloud<pcl::PointXYZI>::Ptr trimmed(new pcl::PointCloud<pcl::PointXYZI>());
+      //         trimmed->points.insert(trimmed->points.end(),
+      //                                map_xyz_i_->points.end() - keep,
+      //                                map_xyz_i_->points.end());
+      //         trimmed->width = (uint32_t)trimmed->points.size();
+      //         trimmed->height = 1;
+      //         trimmed->is_dense = false;
+      //         map_xyz_i_.swap(trimmed);
+      //       }
+
+      //       // Optional: periodic voxel downsample
+      //       map_frame_count_++;
+      //       if (map_ds_every_n_ > 0 && map_voxel_leaf_ > 0.0f &&
+      //           (map_frame_count_ % (uint64_t)map_ds_every_n_ == 0))
+      //       {
+      // #include <pcl/filters/voxel_grid.h>
+      //         pcl::VoxelGrid<pcl::PointXYZI> vg;
+      //         vg.setLeafSize(map_voxel_leaf_, map_voxel_leaf_, map_voxel_leaf_);
+      //         vg.setInputCloud(map_xyz_i_);
+      //         pcl::PointCloud<pcl::PointXYZI>::Ptr filtered(new pcl::PointCloud<pcl::PointXYZI>());
+      //         vg.filter(*filtered);
+      //         filtered->is_dense = false;
+      //         map_xyz_i_.swap(filtered);
+      //       }
+    }
   }
 
   void Engine::handleVIO()
@@ -871,6 +930,14 @@ namespace fastlivo2_core
         }
       }
     }
+  }
+
+  pcl::PointCloud<pcl::PointXYZI>::Ptr Engine::getMap() const
+  {
+    std::lock_guard<std::mutex> lk(map_mtx_);
+    pcl::PointCloud<pcl::PointXYZI>::Ptr out(new pcl::PointCloud<pcl::PointXYZI>());
+    *out = *map_xyz_i_; // deep copy snapshot
+    return out;
   }
 
 } // namespace fastlivo2_core
