@@ -14,7 +14,12 @@ which is included as part of this source code package.
 #define LIVO_FRAME_H_
 
 #include <boost/noncopyable.hpp>
+#ifdef FAST_LIVO2_STANDALONE
+#include "standalone/vision.h"
+#include <atomic>
+#else
 #include <vikit/abstract_camera.h>
+#endif
 
 class VisualPoint;
 struct Feature;
@@ -28,7 +33,11 @@ class Frame : boost::noncopyable
 public:
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
+#ifdef FAST_LIVO2_STANDALONE
+  static std::atomic<int> frame_counter_; //!< Safe when separate estimators create frames concurrently.
+#else
   static int frame_counter_; //!< Counts the number of created frames. Used to set the unique id.
+#endif
   int id_;                   //!< Unique id of the frame.
   vk::AbstractCamera *cam_;  //!< Camera model.
   SE3 T_f_w_;                //!< Transform (f)rame from (w)orld.

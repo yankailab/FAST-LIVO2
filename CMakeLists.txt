@@ -1,147 +1,144 @@
-cmake_minimum_required(VERSION 2.8.3)
-project(fast_livo)
+cmake_minimum_required(VERSION 3.16)
 
-set(CMAKE_BUILD_TYPE "Release")
-message(STATUS "Build Type: ${CMAKE_BUILD_TYPE}")
-
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
-
-# Set common compile options
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pthread -fexceptions")
-
-# Specific settings for Debug build
-set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -O0 -g")
-
-# Detect CPU architecture
-message(STATUS "Current CPU architecture: ${CMAKE_SYSTEM_PROCESSOR}")
-
-# Specific settings for Release build
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm|aarch64|ARM|AARCH64)")
-  if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
-    # 64-bit ARM optimizations (e.g., RK3588 and Jetson Orin NX)
-    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -mcpu=native -mtune=native -ffast-math")
-    message(STATUS "Using 64-bit ARM optimizations: -O3 -mcpu=native -mtune=native -ffast-math")
-  else()
-    # 32-bit ARM optimizations with NEON support
-    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -mcpu=native -mtune=native -mfpu=neon -ffast-math")
-    message(STATUS "Using 32-bit ARM optimizations: -O3 -mcpu=native -mtune=native -mfpu=neon -ffast-math")
-  endif()
-  add_definitions(-DARM_ARCH)
-else()
-  # x86-64 (Intel/AMD) optimizations
-  set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -march=native -mtune=native -funroll-loops") #-flto
-  message(STATUS "Using general x86 optimizations: -O3 -march=native -mtune=native -funroll-loops") 
-  add_definitions(-DX86_ARCH)
+# Keep the upstream catkin application available without making ROS a library
+# dependency. Select this explicitly when building in a ROS 1 workspace.
+option(FAST_LIVO2_BUILD_ROS "Build the original ROS 1 application instead of the standalone library" OFF)
+if(FAST_LIVO2_BUILD_ROS)
+  include(cmake/ROS.cmake)
+  return()
 endif()
 
-# Define project root directory
-add_definitions(-DROOT_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/\")
+project(fast_livo2 VERSION 0.1.0 LANGUAGES CXX)
 
-# Detect CPU core count for potential multithreading optimization
-include(ProcessorCount)
-ProcessorCount(N)
-message(STATUS "Processor count: ${N}")
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
+include(GenerateExportHeader)
+include(CTest)
 
-# Set the number of cores for multithreading
-if(N GREATER 4)
-  math(EXPR PROC_NUM "4")
-  add_definitions(-DMP_EN -DMP_PROC_NUM=${PROC_NUM})
-  message(STATUS "Multithreading enabled. Cores: ${PROC_NUM}")
-elseif(N GREATER 1)
-  math(EXPR PROC_NUM "${N}")
-  add_definitions(-DMP_EN -DMP_PROC_NUM=${PROC_NUM})
-  message(STATUS "Multithreading enabled. Cores: ${PROC_NUM}")
-else()
-  add_definitions(-DMP_PROC_NUM=1)
-  message(STATUS "Single core detected. Multithreading disabled.")
+option(FAST_LIVO2_BUILD_EXAMPLES "Build the standalone synthetic sensor example" ON)
+set(FAST_LIVO2_NUM_THREADS 4 CACHE STRING "Maximum OpenMP threads used by the estimator")
+if(NOT FAST_LIVO2_NUM_THREADS MATCHES "^[1-9][0-9]*$")
+  message(FATAL_ERROR "FAST_LIVO2_NUM_THREADS must be a positive integer")
 endif()
 
-# Check for OpenMP support
-find_package(OpenMP QUIET)
-if(OpenMP_CXX_FOUND)
-  message(STATUS "OpenMP found")
-  add_compile_options(${OpenMP_CXX_FLAGS})
-else()
-  message(STATUS "OpenMP not found, proceeding without it")
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
-# Check for mimalloc support
-find_package(mimalloc QUIET)
-if(mimalloc_FOUND)
-  message(STATUS "mimalloc found")
-else()
-  message(STATUS "mimalloc not found, proceeding without it")
+# Eigen 5 retains the Eigen3 package/target names. Select the intended source
+# installations with Eigen3_DIR and OpenCV_DIR; never substitute Eigen 3/OpenCV 4.
+find_package(Eigen3 5 REQUIRED CONFIG)
+if(Eigen3_VERSION VERSION_LESS 5 OR NOT Eigen3_VERSION VERSION_LESS 6)
+  message(FATAL_ERROR "FAST-LIVO2 requires Eigen 5.x; selected ${Eigen3_VERSION}")
 endif()
+set(FAST_LIVO2_EIGEN_VERSION "${Eigen3_VERSION}")
+get_filename_component(_fast_livo2_eigen_config_dir "${Eigen3_DIR}" REALPATH)
+find_package(OpenCV 5 REQUIRED CONFIG COMPONENTS core imgproc geometry)
+if(NOT OpenCV_VERSION_MAJOR EQUAL 5)
+  message(FATAL_ERROR "FAST-LIVO2 requires OpenCV 5.x; selected ${OpenCV_VERSION}")
+endif()
+find_package(PCL 1.8 REQUIRED CONFIG COMPONENTS common filters)
+# Older PCL packages request Eigen 3.3 even if an Eigen 5 target already exists.
+# Reject their fallback rather than mixing Eigen versions and header paths.
+get_filename_component(_fast_livo2_eigen_config_after_pcl "${Eigen3_DIR}" REALPATH)
+if(NOT Eigen3_VERSION VERSION_EQUAL FAST_LIVO2_EIGEN_VERSION OR
+   NOT _fast_livo2_eigen_config_after_pcl STREQUAL _fast_livo2_eigen_config_dir)
+  message(FATAL_ERROR
+    "PCL changed the selected Eigen ${FAST_LIVO2_EIGEN_VERSION} package "
+    "(${_fast_livo2_eigen_config_dir}) to ${Eigen3_DIR}. "
+    "Build PCL against Eigen 5 using scripts/build_pcl_eigen5.sh and select its PCL_DIR.")
+endif()
+message(STATUS "FAST-LIVO2 Eigen ${FAST_LIVO2_EIGEN_VERSION}: ${Eigen3_DIR}")
+message(STATUS "FAST-LIVO2 OpenCV ${OpenCV_VERSION}: ${OpenCV_DIR}")
+find_package(OpenMP REQUIRED COMPONENTS CXX)
+find_package(Threads REQUIRED)
 
-# Find catkin and required dependencies
-find_package(catkin REQUIRED COMPONENTS
-  geometry_msgs
-  nav_msgs
-  sensor_msgs
-  roscpp
-  rospy
-  std_msgs
-  pcl_ros
-  tf
-  message_generation
-  eigen_conversions
-  vikit_common
-  vikit_ros
-  cv_bridge
-  image_transport
+add_library(fast_livo2 SHARED
+  src/IMU_Processing.cpp
+  src/voxel_map.cpp
+  src/vio.cpp
+  src/frame.cpp
+  src/visual_point.cpp
+  src/standalone/vision.cpp
+  src/standalone/slam.cpp
+)
+add_library(fast_livo2::fast_livo2 ALIAS fast_livo2)
+generate_export_header(fast_livo2
+  EXPORT_FILE_NAME "${CMAKE_CURRENT_BINARY_DIR}/include/fast_livo2/export.hpp"
+)
+target_compile_features(fast_livo2 PUBLIC cxx_std_17)
+set_target_properties(fast_livo2 PROPERTIES
+  VERSION ${PROJECT_VERSION}
+  SOVERSION ${PROJECT_VERSION_MAJOR}
+  CXX_EXTENSIONS OFF
+  CXX_VISIBILITY_PRESET hidden
+  VISIBILITY_INLINES_HIDDEN YES
+)
+target_compile_definitions(fast_livo2 PRIVATE
+  FAST_LIVO2_STANDALONE
+  MP_PROC_NUM=${FAST_LIVO2_NUM_THREADS}
+  ROOT_DIR=""
+)
+if(FAST_LIVO2_NUM_THREADS GREATER 1)
+  target_compile_definitions(fast_livo2 PRIVATE MP_EN)
+endif()
+target_include_directories(fast_livo2
+  PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/include>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
+target_include_directories(fast_livo2 SYSTEM PRIVATE ${PCL_INCLUDE_DIRS})
+target_compile_options(fast_livo2 PRIVATE ${PCL_DEFINITIONS})
+target_link_libraries(fast_livo2
+  PUBLIC Eigen3::Eigen opencv_core
+  PRIVATE
+    opencv_imgproc opencv_geometry
+    ${PCL_LIBRARIES}
+    OpenMP::OpenMP_CXX Threads::Threads
 )
 
-find_package(Eigen3 REQUIRED)
-find_package(PCL REQUIRED)
-find_package(OpenCV REQUIRED)
-find_package(Sophus REQUIRED)
-find_package(Boost REQUIRED COMPONENTS thread)
-
-set(Sophus_LIBRARIES libSophus.so)
-
-# Define the catkin package
-catkin_package(
-  CATKIN_DEPENDS geometry_msgs nav_msgs roscpp rospy std_msgs message_runtime cv_bridge vikit_common vikit_ros image_transport
-  DEPENDS EIGEN3 PCL OpenCV Sophus
-)
-
-# Include directories for dependencies
-include_directories(
-  ${catkin_INCLUDE_DIRS}
-  ${EIGEN3_INCLUDE_DIR}
-  ${PCL_INCLUDE_DIRS}
-  ${OpenCV_INCLUDE_DIRS}
-  ${Sophus_INCLUDE_DIRS}
-  include
-)
-
-# Add libraries
-add_library(vio src/vio.cpp src/frame.cpp src/visual_point.cpp)
-add_library(lio src/voxel_map.cpp)
-add_library(pre src/preprocess.cpp)
-add_library(imu_proc src/IMU_Processing.cpp)
-add_library(laser_mapping src/LIVMapper.cpp)
-
-# Add the main executable
-add_executable(fastlivo_mapping src/main.cpp)
-
-# Link libraries to the executable
-target_link_libraries(fastlivo_mapping
-  laser_mapping
-  vio
-  lio
-  pre
-  imu_proc
-  ${catkin_LIBRARIES}
-  ${PCL_LIBRARIES}
-  ${OpenCV_LIBRARIES}
-  ${Sophus_LIBRARIES}
-  ${Boost_LIBRARIES}
-)
-
-# Link mimalloc if found
-if(mimalloc_FOUND)
-  target_link_libraries(fastlivo_mapping mimalloc)
+if(FAST_LIVO2_BUILD_EXAMPLES)
+  add_executable(fast_livo2_example examples/standalone.cpp)
+  target_link_libraries(fast_livo2_example PRIVATE fast_livo2::fast_livo2)
 endif()
+
+if(BUILD_TESTING)
+  add_executable(fast_livo2_standalone_test tests/standalone_test.cpp)
+  target_link_libraries(fast_livo2_standalone_test PRIVATE fast_livo2::fast_livo2)
+  add_test(NAME fast_livo2.standalone COMMAND fast_livo2_standalone_test)
+  add_executable(fast_livo2_vision_test tests/standalone/vision_helpers.cpp src/standalone/vision.cpp)
+  target_compile_features(fast_livo2_vision_test PRIVATE cxx_std_17)
+  target_include_directories(fast_livo2_vision_test PRIVATE include)
+  target_link_libraries(fast_livo2_vision_test PRIVATE
+    Eigen3::Eigen opencv_core opencv_imgproc opencv_geometry)
+  add_test(NAME fast_livo2.vision_helpers COMMAND fast_livo2_vision_test)
+endif()
+
+install(TARGETS fast_livo2 EXPORT fast_livo2Targets
+  LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+install(FILES include/fast_livo2/slam.hpp DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/fast_livo2)
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/include/fast_livo2/export.hpp"
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/fast_livo2)
+install(FILES LICENSE docs/Standalone.md DESTINATION ${CMAKE_INSTALL_DOCDIR})
+
+set(fast_livo2_INSTALL_CMAKEDIR "${CMAKE_INSTALL_LIBDIR}/cmake/fast_livo2")
+configure_package_config_file(cmake/fast_livo2Config.cmake.in
+  "${CMAKE_CURRENT_BINARY_DIR}/fast_livo2Config.cmake"
+  INSTALL_DESTINATION "${fast_livo2_INSTALL_CMAKEDIR}"
+)
+write_basic_package_version_file("${CMAKE_CURRENT_BINARY_DIR}/fast_livo2ConfigVersion.cmake"
+  VERSION ${PROJECT_VERSION}
+  COMPATIBILITY SameMajorVersion
+)
+install(EXPORT fast_livo2Targets NAMESPACE fast_livo2::
+  DESTINATION "${fast_livo2_INSTALL_CMAKEDIR}"
+)
+install(FILES
+  "${CMAKE_CURRENT_BINARY_DIR}/fast_livo2Config.cmake"
+  "${CMAKE_CURRENT_BINARY_DIR}/fast_livo2ConfigVersion.cmake"
+  DESTINATION "${fast_livo2_INSTALL_CMAKEDIR}"
+)

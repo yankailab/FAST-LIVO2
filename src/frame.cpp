@@ -10,16 +10,21 @@ This file is subject to the terms and conditions outlined in the 'LICENSE' file,
 which is included as part of this source code package.
 */
 
-#include <boost/bind.hpp>
 #include "feature.h"
 #include "frame.h"
 #include "visual_point.h"
 #include <stdexcept>
+#ifndef FAST_LIVO2_STANDALONE
 #include <vikit/math_utils.h>
 #include <vikit/performance_monitor.h>
 #include <vikit/vision.h>
+#endif
 
+#ifdef FAST_LIVO2_STANDALONE
+std::atomic<int> Frame::frame_counter_{0};
+#else
 int Frame::frame_counter_ = 0;
+#endif
 
 Frame::Frame(vk::AbstractCamera *cam, const cv::Mat &img)
     : id_(frame_counter_++), 
@@ -53,6 +58,7 @@ namespace frame_utils
 
 void createImgPyramid(const cv::Mat &img_level_0, int n_levels, ImgPyr &pyr)
 {
+  if (n_levels <= 0) throw std::invalid_argument("Image pyramid needs at least one level");
   pyr.resize(n_levels);
   pyr[0] = img_level_0;
   for (int i = 1; i < n_levels; ++i)

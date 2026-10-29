@@ -13,11 +13,13 @@ which is included as part of this source code package.
 #include "visual_point.h"
 #include "feature.h"
 #include <stdexcept>
+#ifndef FAST_LIVO2_STANDALONE
 #include <vikit/math_utils.h>
+#endif
 
 VisualPoint::VisualPoint(const Vector3d &pos)
     : pos_(pos), previous_normal_(Vector3d::Zero()), normal_(Vector3d::Zero()),
-      is_converged_(false), is_normal_initialized_(false), has_ref_patch_(false)
+      is_converged_(false), is_normal_initialized_(false), has_ref_patch_(false), ref_patch(nullptr)
 {
 }
 
@@ -96,6 +98,7 @@ bool VisualPoint::getCloseViewObs(const Vector3d &framepos, Feature *&ftr, const
 
 void VisualPoint::findMinScoreFeature(const Vector3d &framepos, Feature *&ftr) const
 {
+  if (obs_.empty()) { ftr = nullptr; return; }
   auto min_it = obs_.begin();
   float min_score = std::numeric_limits<float>::max();
 

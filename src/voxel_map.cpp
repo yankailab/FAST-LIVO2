@@ -33,6 +33,7 @@ void calcBodyCov(Eigen::Vector3d &pb, const float range_inc, const float degree_
   cov = direction * range_var * direction.transpose() + A * direction_var * A.transpose();
 }
 
+#ifndef FAST_LIVO2_STANDALONE
 void loadVoxelConfig(ros::NodeHandle &nh, VoxelMapConfig &voxel_config)
 {
   nh.param<bool>("publish/pub_plane_en", voxel_config.is_pub_plane_map_, false);
@@ -51,6 +52,12 @@ void loadVoxelConfig(ros::NodeHandle &nh, VoxelMapConfig &voxel_config)
   nh.param<int>("local_map/half_map_size", voxel_config.half_map_size, 100);
   nh.param<double>("local_map/sliding_thresh", voxel_config.sliding_thresh, 8);
 }
+#else
+VoxelMapManager::~VoxelMapManager()
+{
+  for (auto &entry : voxel_map_) delete entry.second;
+}
+#endif
 
 void VoxelOctoTree::init_plane(const std::vector<pointWithVar> &points, VoxelPlane *plane)
 {
@@ -60,6 +67,12 @@ void VoxelOctoTree::init_plane(const std::vector<pointWithVar> &points, VoxelPla
   plane->normal_ = Eigen::Vector3d::Zero();
   plane->points_size_ = points.size();
   plane->radius_ = 0;
+  if (points.empty())
+  {
+    plane->is_plane_ = false;
+    plane->is_update_ = true;
+    return;
+  }
   for (auto pv : points)
   {
     plane->covariance_ += pv.point_w * pv.point_w.transpose();
@@ -67,15 +80,18 @@ void VoxelOctoTree::init_plane(const std::vector<pointWithVar> &points, VoxelPla
   }
   plane->center_ = plane->center_ / plane->points_size_;
   plane->covariance_ = plane->covariance_ / plane->points_size_ - plane->center_ * plane->center_.transpose();
-  Eigen::EigenSolver<Eigen::Matrix3d> es(plane->covariance_);
-  Eigen::Matrix3cd evecs = es.eigenvectors();
-  Eigen::Vector3cd evals = es.eigenvalues();
-  Eigen::Vector3d evalsReal;
-  evalsReal = evals.real();
-  Eigen::Matrix3f::Index evalsMin, evalsMax;
-  evalsReal.rowwise().sum().minCoeff(&evalsMin);
-  evalsReal.rowwise().sum().maxCoeff(&evalsMax);
-  int evalsMid = 3 - evalsMin - evalsMax;
+  // Covariance is symmetric. Sorted eigenpairs remain well-defined when
+  // eigenvalues repeat; selecting min/max separately can produce mid index 3.
+  Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> es(plane->covariance_);
+  if (es.info() != Eigen::Success)
+  {
+    plane->is_plane_ = false;
+    plane->is_update_ = true;
+    return;
+  }
+  const Eigen::Matrix3d evecs = es.eigenvectors();
+  const Eigen::Vector3d evalsReal = es.eigenvalues();
+  constexpr int evalsMin = 0, evalsMid = 1, evalsMax = 2;
   Eigen::Vector3d evecMin = evecs.real().col(evalsMin);
   Eigen::Vector3d evecMid = evecs.real().col(evalsMid);
   Eigen::Vector3d evecMax = evecs.real().col(evalsMax);
@@ -83,7 +99,9 @@ void VoxelOctoTree::init_plane(const std::vector<pointWithVar> &points, VoxelPla
   J_Q << 1.0 / plane->points_size_, 0, 0, 0, 1.0 / plane->points_size_, 0, 0, 0, 1.0 / plane->points_size_;
   // && evalsReal(evalsMid) > 0.05
   //&& evalsReal(evalsMid) > 0.01
-  if (evalsReal(evalsMin) < planer_threshold_)
+  const double eigen_gap_tolerance = 1e-12 * std::max(1.0, std::abs(evalsReal(evalsMax)));
+  if (evalsReal(evalsMin) < planer_threshold_ &&
+      evalsReal(evalsMid) - evalsReal(evalsMin) > eigen_gap_tolerance)
   {
     for (int i = 0; i < points.size(); i++)
     {
@@ -116,14 +134,16 @@ void VoxelOctoTree::init_plane(const std::vector<pointWithVar> &points, VoxelPla
     plane->min_eigen_value_ = evalsReal(evalsMin);
     plane->mid_eigen_value_ = evalsReal(evalsMid);
     plane->max_eigen_value_ = evalsReal(evalsMax);
-    plane->radius_ = sqrt(evalsReal(evalsMax));
+    plane->radius_ = sqrt(std::max(0.0, evalsReal(evalsMax)));
     plane->d_ = -(plane->normal_(0) * plane->center_(0) + plane->normal_(1) * plane->center_(1) + plane->normal_(2) * plane->center_(2));
     plane->is_plane_ = true;
     plane->is_update_ = true;
     if (!plane->is_init_)
     {
+#ifndef FAST_LIVO2_STANDALONE
       plane->id_ = voxel_plane_id;
       voxel_plane_id++;
+#endif
       plane->is_init_ = true;
     }
   }
@@ -401,8 +421,15 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
       total_residual += fabs(ptpl_list_[i].dis_to_plane_);
     }
     effct_feat_num_ = ptpl_list_.size();
+    if (effct_feat_num_ == 0)
+    {
+      position_last_ = state_.pos_end;
+      break;
+    }
+#ifndef FAST_LIVO2_STANDALONE
     cout << "[ LIO ] Raw feature num: " << feats_undistort_->size() << ", downsampled feature num:" << feats_down_size_ 
          << " effective feature num: " << effct_feat_num_ << " average residual: " << total_residual / effct_feat_num_ << endl;
+#endif
 
     /*** Computation of Measuremnt Jacobian matrix H and measurents covarience
      * ***/
@@ -475,7 +502,9 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
     auto rot_add = solution.block<3, 1>(0, 0);
     auto t_add = solution.block<3, 1>(3, 0);
     if ((rot_add.norm() * 57.3 < 0.01) && (t_add.norm() * 100 < 0.015)) { flg_EKF_converged = true; }
+#ifndef FAST_LIVO2_STANDALONE
     V3D euler_cur = state_.rot_end.eulerAngles(2, 1, 0);
+#endif
 
     /*** Rematch Judgement ***/
 
@@ -490,7 +519,9 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
           (I_STATE.block<DIM_STATE, DIM_STATE>(0, 0) - G.block<DIM_STATE, DIM_STATE>(0, 0)) * state_.cov.block<DIM_STATE, DIM_STATE>(0, 0);
       // total_distance += (_state.pos_end - position_last).norm();
       position_last_ = state_.pos_end;
+#ifndef FAST_LIVO2_STANDALONE
       geoQuat_ = tf::createQuaternionMsgFromRollPitchYaw(euler_cur(0), euler_cur(1), euler_cur(2));
+#endif
 
       // VD(DIM_STATE) K_sum  = K.rowwise().sum();
       // VD(DIM_STATE) P_diag = _state.cov.diagonal();
@@ -725,7 +756,7 @@ void VoxelMapManager::build_single_residual(pointWithVar &pv, const VoxelOctoTre
     float dis_to_plane = fabs(plane.normal_(0) * p_w(0) + plane.normal_(1) * p_w(1) + plane.normal_(2) * p_w(2) + plane.d_);
     float dis_to_center = (plane.center_(0) - p_w(0)) * (plane.center_(0) - p_w(0)) + (plane.center_(1) - p_w(1)) * (plane.center_(1) - p_w(1)) +
                           (plane.center_(2) - p_w(2)) * (plane.center_(2) - p_w(2));
-    float range_dis = sqrt(dis_to_center - dis_to_plane * dis_to_plane);
+    float range_dis = sqrt(std::max(0.0f, dis_to_center - dis_to_plane * dis_to_plane));
 
     if (range_dis <= radius_k * plane.radius_)
     {
@@ -734,6 +765,7 @@ void VoxelMapManager::build_single_residual(pointWithVar &pv, const VoxelOctoTre
       J_nq.block<1, 3>(0, 3) = -plane.normal_;
       double sigma_l = J_nq * plane.plane_var_ * J_nq.transpose();
       sigma_l += plane.normal_.transpose() * pv.var * plane.normal_;
+      if (!std::isfinite(sigma_l) || sigma_l <= 0.0) return;
       if (dis_to_plane < sigma_num * sqrt(sigma_l))
       {
         is_sucess = true;
@@ -750,6 +782,8 @@ void VoxelMapManager::build_single_residual(pointWithVar &pv, const VoxelOctoTre
           single_ptpl.center_ = plane.center_;
           single_ptpl.d_ = plane.d_;
           single_ptpl.layer_ = current_layer;
+          single_ptpl.eigen_value_ = plane.min_eigen_value_;
+          single_ptpl.is_valid_ = true;
           single_ptpl.dis_to_plane_ = plane.normal_(0) * p_w(0) + plane.normal_(1) * p_w(1) + plane.normal_(2) * p_w(2) + plane.d_;
         }
         return;
@@ -785,6 +819,7 @@ void VoxelMapManager::build_single_residual(pointWithVar &pv, const VoxelOctoTre
   }
 }
 
+#ifndef FAST_LIVO2_STANDALONE
 void VoxelMapManager::pubVoxelMap()
 {
   double max_trace = 0.25;
@@ -921,11 +956,15 @@ void VoxelMapManager::mapJet(double v, double vmin, double vmax, uint8_t &r, uin
   b = (uint8_t)(255 * db);
 }
 
+#endif
+
 void VoxelMapManager::mapSliding()
 {
   if((position_last_ - last_slide_position).norm() < config_setting_.sliding_thresh)
   {
+#ifndef FAST_LIVO2_STANDALONE
     std::cout<<RED<<"[DEBUG]: Last sliding length "<<(position_last_ - last_slide_position).norm()<<RESET<<"\n";
+#endif
     return;
   }
 
@@ -943,7 +982,9 @@ void VoxelMapManager::mapSliding()
                     (int64_t)loc_xyz[1] + config_setting_.half_map_size, (int64_t)loc_xyz[1] - config_setting_.half_map_size,
                     (int64_t)loc_xyz[2] + config_setting_.half_map_size, (int64_t)loc_xyz[2] - config_setting_.half_map_size);
   double t_sliding_end = omp_get_wtime();
+#ifndef FAST_LIVO2_STANDALONE
   std::cout<<RED<<"[DEBUG]: Map sliding using "<<t_sliding_end - t_sliding_start<<" secs"<<RESET<<"\n";
+#endif
   return;
 }
 
@@ -966,6 +1007,8 @@ void VoxelMapManager::clearMemOutOfMap(const int& x_max,const int& x_min,const i
       ++it;
     }
   }
+#ifndef FAST_LIVO2_STANDALONE
   std::cout<<RED<<"[DEBUG]: Delete "<<delete_voxel_cout<<" root voxels"<<RESET<<"\n";
+#endif
   // std::cout<<RED<<"[DEBUG]: Delete "<<delete_voxel_cout<<" voxels using "<<delete_time<<" s"<<RESET<<"\n";
 }

@@ -1,5 +1,18 @@
 # FAST-LIVO2
 
+**ROS-free C++ library:** the default CMake build produces `libfast_livo2` and an
+installable `fast_livo2::fast_livo2` target. See [Standalone library](docs/Standalone.md)
+for dependencies, build/install commands, and the sensor API. The standalone
+build uses **Eigen 5.x** and a source-built **OpenCV 5.0**; this system's selected
+installations are Eigen **5.0.1** and OpenCV **5.0.0** under `/usr/local`.
+The guide shows how to select these installations explicitly for the library
+and consuming applications.
+
+The original ROS 1 application is retained; select it with
+`-DFAST_LIVO2_BUILD_ROS=ON` (including when using `catkin_make`). The upstream ROS
+instructions below are historical and describe that separate mode, including
+its original dependency versions. They do not describe the standalone build.
+
 ## FAST-LIVO2: Fast, Direct LiDAR-Inertial-Visual Odometry
 
 ### 📢 News
@@ -91,7 +104,7 @@ Clone the repository and catkin_make:
 cd ~/catkin_ws/src
 git clone https://github.com/hku-mars/FAST-LIVO2
 cd ../
-catkin_make
+catkin_make -DFAST_LIVO2_BUILD_ROS=ON
 source ~/catkin_ws/devel/setup.bash
 ```
 

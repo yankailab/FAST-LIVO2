@@ -11,9 +11,27 @@ which is included as part of this source code package.
 */
 
 #include "vio.h"
+#include <cstdio>
+#include <stdexcept>
+
+#ifdef FAST_LIVO2_STANDALONE
+#define VIO_LOG(...) ((void)0)
+#else
+#define VIO_LOG(...) std::printf(__VA_ARGS__)
+#endif
+
+namespace {
+bool isPixelInside(const vk::AbstractCamera& camera, const V2D& pixel, int margin)
+{
+  return pixel.allFinite() && pixel.x() >= margin && pixel.y() >= margin &&
+         pixel.x() < camera.width() - margin && pixel.y() < camera.height() - margin;
+}
+} // namespace
 
 VIOManager::VIOManager()
 {
+  G.setZero();
+  H_T_H.setZero();
   // downSizeFilter.setLeafSize(0.2, 0.2, 0.2);
 }
 
@@ -40,6 +58,15 @@ void VIOManager::setLidarToCameraExtrinsic(vector<double> &R, vector<double> &P)
 
 void VIOManager::initializeVIO()
 {
+  if (!cam || !state || !state_propagat)
+    throw std::invalid_argument("VIO requires a camera and state storage");
+  if (visual_submap) throw std::logic_error("VIO is already initialized; create a new manager to reset");
+  if (patch_size < 2 || patch_size % 2 != 0 || patch_pyrimid_level < 1 || patch_pyrimid_level > 8)
+    throw std::invalid_argument("VIO patch size must be positive and even, with 1 to 8 pyramid levels");
+#ifdef FAST_LIVO2_STANDALONE
+  plot_flag = false;
+  colmap_output_en = false;
+#endif
   visual_submap = new SubSparseMap;
 
   fx = cam->fx();
@@ -48,12 +75,12 @@ void VIOManager::initializeVIO()
   cy = cam->cy();
   image_resize_factor = cam->scale();
 
-  printf("intrinsic: %.6lf, %.6lf, %.6lf, %.6lf\n", fx, fy, cx, cy);
+  VIO_LOG("intrinsic: %.6lf, %.6lf, %.6lf, %.6lf\n", fx, fy, cx, cy);
 
   width = cam->width();
   height = cam->height();
 
-  printf("width: %d, height: %d, scale: %f\n", width, height, image_resize_factor);
+  VIO_LOG("width: %d, height: %d, scale: %f\n", width, height, image_resize_factor);
   Rci = Rcl * Rli;
   Pci = Rcl * Pli + Pcl;
 
@@ -66,14 +93,16 @@ void VIOManager::initializeVIO()
 
   if (grid_size > 10)
   {
-    grid_n_width = ceil(static_cast<double>(width / grid_size));
-    grid_n_height = ceil(static_cast<double>(height / grid_size));
+    grid_n_width = (width + grid_size - 1) / grid_size;
+    grid_n_height = (height + grid_size - 1) / grid_size;
   }
   else
   {
-    grid_size = static_cast<int>(height / grid_n_height);
-    grid_n_height = ceil(static_cast<double>(height / grid_size));
-    grid_n_width = ceil(static_cast<double>(width / grid_size));
+    if (grid_n_height <= 0 || grid_n_height > height)
+      throw std::invalid_argument("VIO grid height must lie within the image");
+    grid_size = height / grid_n_height;
+    grid_n_height = (height + grid_size - 1) / grid_size;
+    grid_n_width = (width + grid_size - 1) / grid_size;
   }
   length = grid_n_width * grid_n_height;
 
@@ -86,7 +115,7 @@ void VIOManager::initializeVIO()
 
     std::vector<std::vector<V3D>>().swap(rays_with_sample_points);
     rays_with_sample_points.reserve(length);
-    printf("grid_size: %d, grid_n_height: %d, grid_n_width: %d, length: %d\n", grid_size, grid_n_height, grid_n_width, length);
+    VIO_LOG("grid_size: %d, grid_n_height: %d, grid_n_width: %d, length: %d\n", grid_size, grid_n_height, grid_n_width, length);
 
     float d_min = 0.1;
     float d_max = 3.0;
@@ -125,6 +154,7 @@ void VIOManager::initializeVIO()
     // cv::waitKey(1);
   }
 
+#ifndef FAST_LIVO2_STANDALONE
   if(colmap_output_en)
   {
     pinhole_cam = dynamic_cast<vk::PinholeCamera*>(cam);
@@ -141,6 +171,7 @@ void VIOManager::initializeVIO()
         << cx << " " << cy << std::endl;
     fout_camera.close();
   }
+#endif
   grid_num.resize(length);
   map_index.resize(length);
   map_dist.resize(length);
@@ -188,6 +219,9 @@ void VIOManager::resetGrid()
 
 void VIOManager::computeProjectionJacobian(V3D p, MD(2, 3) & J)
 {
+#ifdef FAST_LIVO2_STANDALONE
+  J = cam->projectionJacobian(p);
+#else
   const double x = p[0];
   const double y = p[1];
   const double z_inv = 1. / p[2];
@@ -198,6 +232,7 @@ void VIOManager::computeProjectionJacobian(V3D p, MD(2, 3) & J)
   J(1, 0) = 0.0;
   J(1, 1) = fy * z_inv;
   J(1, 2) = -fy * y * z_inv_2;
+#endif
 }
 
 void VIOManager::getImagePatch(cv::Mat img, V2D pc, float *patch_tmp, int level)
@@ -294,9 +329,9 @@ void VIOManager::warpAffine(const Matrix2d &A_cur_ref, const cv::Mat &img_ref, c
 {
   const int patch_size = halfpatch_size * 2;
   const Matrix2f A_ref_cur = A_cur_ref.inverse().cast<float>();
-  if (isnan(A_ref_cur(0, 0)))
+  if (!A_ref_cur.allFinite())
   {
-    printf("Affine warp is NaN, probably camera has no translation\n"); // TODO
+    VIO_LOG("Affine warp is NaN, probably camera has no translation\n"); // TODO
     return;
   }
 
@@ -309,7 +344,7 @@ void VIOManager::warpAffine(const Matrix2d &A_cur_ref, const cv::Mat &img_ref, c
       px_patch *= (1 << search_level);
       px_patch *= (1 << pyramid_level);
       const Vector2f px(A_ref_cur * px_patch + px_ref.cast<float>());
-      if (px[0] < 0 || px[1] < 0 || px[0] >= img_ref.cols - 1 || px[1] >= img_ref.rows - 1)
+      if (!px.allFinite() || px[0] < 0 || px[1] < 0 || px[0] >= img_ref.cols - 1 || px[1] >= img_ref.rows - 1)
         patch_ptr[patch_size_total * pyramid_level + y * patch_size + x] = 0;
       else
         patch_ptr[patch_size_total * pyramid_level + y * patch_size + x] = (float)vk::interpolateMat_8u(img_ref, px[0], px[1]);
@@ -366,7 +401,11 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
 
   float voxel_size = 0.5;
 
-  if (!normal_en) warp_map.clear();
+  if (!normal_en)
+  {
+    for (auto& entry : warp_map) delete entry.second;
+    warp_map.clear();
+  }
 
   cv::Mat depth_img = cv::Mat::zeros(height, width, CV_32FC1);
   float *it = (float *)depth_img.data;
@@ -415,7 +454,7 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
       // px[1] = fy * pt_c[1]/pt_c[2]+ cy;
       px = new_frame_->cam_->world2cam(pt_c);
 
-      if (new_frame_->cam_->isInFrame(px.cast<int>(), border))
+      if (isPixelInside(*new_frame_->cam_, px, border))
       {
         // cv::circle(img_cp, cv::Point2f(px[0], px[1]), 3, cv::Scalar(0, 0, 255), -1, 8);
         float depth = pt_c[2];
@@ -464,7 +503,7 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
         // if (dir.dot(norm_vec) <= 0.17) continue; // 0.34 70 degree  0.17 80 degree 0.08 85 degree
 
         V2D pc(new_frame_->w2c(pt->pos_));
-        if (new_frame_->cam_->isInFrame(pc.cast<int>(), border))
+        if (isPixelInside(*new_frame_->cam_, pc, border))
         {
           // cv::circle(img_cp, cv::Point2f(pc[0], pc[1]), 3, cv::Scalar(0, 255, 255), -1, 8);
           voxel_in_fov = true;
@@ -543,7 +582,7 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
 
             V2D pc(new_frame_->w2c(pt->pos_));
 
-            if (new_frame_->cam_->isInFrame(pc.cast<int>(), border))
+            if (isPixelInside(*new_frame_->cam_, pc, border))
             {
               // cv::circle(img_cp, cv::Point2f(pc[0], pc[1]), 3, cv::Scalar(255, 255, 0), -1, 8); 
               // sub_map_ray_fov.push_back(pt);
@@ -574,7 +613,7 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
           {
             VoxelOctoTree *current_octo;
             current_octo = iter->second->find_correspond(sample_point_w);
-            if (current_octo->plane_ptr_->is_plane_)
+            if (current_octo && current_octo->plane_ptr_->is_plane_)
             {
               pointWithVar plane_center;
               VoxelPlane &plane = *current_octo->plane_ptr_;
@@ -694,6 +733,9 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
       else
       {
         if (!pt->getCloseViewObs(new_frame_->pos(), ref_ftr, pc)) continue;
+        // Inverse composition also needs the observation selected without normals.
+        pt->ref_patch = ref_ftr;
+        pt->has_ref_patch_ = true;
       }
 
       if (normal_en)
@@ -778,7 +820,7 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
   // cout<<"C. addSubSparseMap: "<<t3-t2<<endl;
   // cout<<"depthcontinuous: C1 "<<t_2<<" C2 "<<t_3<<" C3 "<<t_4<<" C4
   // "<<t_5<<endl;
-  printf("[ VIO ] Retrieve %d points from visual sparse map\n", total_points);
+  VIO_LOG("[ VIO ] Retrieve %d points from visual sparse map\n", total_points);
 }
 
 void VIOManager::computeJacobianAndUpdateEKF(cv::Mat img)
@@ -786,6 +828,7 @@ void VIOManager::computeJacobianAndUpdateEKF(cv::Mat img)
   if (total_points == 0) return;
   
   compute_jacobian_time = update_ekf_time = 0.0;
+  G.setZero();
 
   for (int level = patch_pyrimid_level - 1; level >= 0; level--)
   {
@@ -811,9 +854,10 @@ void VIOManager::generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg)
     if (pg[i].normal == V3D(0, 0, 0)) continue;
 
     V3D pt = pg[i].point_w;
+    if (new_frame_->w2f(pt).z() <= 0.0) continue;
     V2D pc(new_frame_->w2c(pt));
 
-    if (new_frame_->cam_->isInFrame(pc.cast<int>(), border)) // 20px is the patch size in the matcher
+    if (isPixelInside(*new_frame_->cam_, pc, border)) // 20px is the patch size in the matcher
     {
       int index = static_cast<int>(pc[1] / grid_size) * grid_n_width + static_cast<int>(pc[0] / grid_size);
 
@@ -834,9 +878,10 @@ void VIOManager::generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg)
   for (int j = 0; j < visual_submap->add_from_voxel_map.size(); j++)
   {
     V3D pt = visual_submap->add_from_voxel_map[j].point_w;
+    if (new_frame_->w2f(pt).z() <= 0.0) continue;
     V2D pc(new_frame_->w2c(pt));
 
-    if (new_frame_->cam_->isInFrame(pc.cast<int>(), border)) // 20px is the patch size in the matcher
+    if (isPixelInside(*new_frame_->cam_, pc, border)) // 20px is the patch size in the matcher
     {
       int index = static_cast<int>(pc[1] / grid_size) * grid_n_width + static_cast<int>(pc[0] / grid_size);
 
@@ -869,6 +914,7 @@ void VIOManager::generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg)
       dir.normalize();
       double cos_theta = dir.dot(norm_vec);
       // if(std::fabs(cos_theta)<0.34) continue; // 70 degree
+      if (new_frame_->w2f(pt).z() <= 0.0) continue;
       V2D pc(new_frame_->w2c(pt));
 
       float *patch = new float[patch_size_total];
@@ -899,7 +945,7 @@ void VIOManager::generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg)
 
   // double t_b2 = omp_get_wtime() - t0;
 
-  printf("[ VIO ] Append %d new visual map points\n", add);
+  VIO_LOG("[ VIO ] Append %d new visual map points\n", add);
   // printf("pg.size: %d \n", pg.size());
   // printf("B1. : %.6lf \n", t_b1);
   // printf("B2. : %.6lf \n", t_b2);
@@ -922,10 +968,11 @@ void VIOManager::updateVisualMapPoints(cv::Mat img)
     }
 
     V2D pc(new_frame_->w2c(pt->pos_));
+    if (!pc.allFinite() || !isPixelInside(*cam, pc, border)) continue;
     bool add_flag = false;
     
-    float *patch_temp = new float[patch_size_total];
-    getImagePatch(img, pc, patch_temp, 0);
+    std::unique_ptr<float[]> patch_temp(new float[patch_size_total]);
+    getImagePatch(img, pc, patch_temp.get(), 0);
     // TODO: condition: distance and view_angle
     // Step 1: time
     Feature *last_feature = pt->obs_.back();
@@ -956,14 +1003,15 @@ void VIOManager::updateVisualMapPoints(cv::Mat img)
       update_num += 1;
       update_flag[i] = 1;
       Vector3d f = cam->cam2world(pc);
-      Feature *ftr_new = new Feature(pt, patch_temp, pc, f, new_frame_->T_f_w_, visual_submap->search_levels[i]);
+      Feature *ftr_new = new Feature(pt, patch_temp.get(), pc, f, new_frame_->T_f_w_, visual_submap->search_levels[i]);
+      patch_temp.release();
       ftr_new->img_ = img;
       ftr_new->id_ = new_frame_->id_;
       ftr_new->inv_expo_time_ = state->inv_expo_time;
       pt->addFrameRef(ftr_new);
     }
   }
-  printf("[ VIO ] Update %d points in visual submap\n", update_num);
+  VIO_LOG("[ VIO ] Update %d points in visual submap\n", update_num);
 }
 
 void VIOManager::updateReferencePatch(const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)
@@ -992,7 +1040,7 @@ void VIOManager::updateReferencePatch(const unordered_map<VOXEL_LOCATION, VoxelO
     {
       VoxelOctoTree *current_octo;
       current_octo = iter->second->find_correspond(p_w);
-      if (current_octo->plane_ptr_->is_plane_)
+      if (current_octo && current_octo->plane_ptr_->is_plane_)
       {
         VoxelPlane &plane = *current_octo->plane_ptr_;
         float dis_to_plane = plane.normal_(0) * p_w(0) + plane.normal_(1) * p_w(1) + plane.normal_(2) * p_w(2) + plane.d_;
@@ -1051,7 +1099,7 @@ void VIOManager::updateReferencePatch(const unordered_map<VOXEL_LOCATION, VoxelO
       double cos_angle = pf.dot(norm_vec);
       // if(fabs(cos_angle) < 0.86) continue; // 20 degree
 
-      float ref_mean;
+      float ref_mean = ref_patch_temp->mean_;
       if (abs(ref_patch_temp->mean_) < 1e-6)
       {
         float ref_sum = std::accumulate(patch_temp, patch_temp + patch_size_total, 0.0);
@@ -1064,7 +1112,7 @@ void VIOManager::updateReferencePatch(const unordered_map<VOXEL_LOCATION, VoxelO
         if ((*itm)->id_ == ref_patch_temp->id_) continue;
         float *patch_cache = (*itm)->patch_;
 
-        float other_mean;
+        float other_mean = (*itm)->mean_;
         if (abs((*itm)->mean_) < 1e-6)
         {
           float other_sum = std::accumulate(patch_cache, patch_cache + patch_size_total, 0.0);
@@ -1101,6 +1149,7 @@ void VIOManager::updateReferencePatch(const unordered_map<VOXEL_LOCATION, VoxelO
 
 void VIOManager::projectPatchFromRefToCur(const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)
 {
+#ifndef FAST_LIVO2_STANDALONE
   if (total_points == 0) return;
   // if(new_frame_->id_ != 2) return; //124
 
@@ -1322,6 +1371,7 @@ void VIOManager::projectPatchFromRefToCur(const unordered_map<VOXEL_LOCATION, Vo
                   ".png",
               ref_cur_combine_error);
   cv::imwrite(dir + std::to_string(new_frame_->id_) + "_0_" + "normal" + ".png", ref_cur_combine_normal);
+#endif
 }
 
 void VIOManager::precomputeReferencePatches(int level)
@@ -1343,13 +1393,13 @@ void VIOManager::precomputeReferencePatches(int level)
     const int scale = (1 << level);
 
     VisualPoint *pt = visual_submap->voxel_points[i];
+    if (pt == nullptr || pt->ref_patch == nullptr) continue;
     cv::Mat img = pt->ref_patch->img_;
-
-    if (pt == nullptr) continue;
 
     double depth((pt->pos_ - pt->ref_patch->pos()).norm());
     V3D pf = pt->ref_patch->f_ * depth;
     V2D pc = pt->ref_patch->px_;
+    if (!pc.allFinite() || !isPixelInside(*cam, pc, (patch_size_half + 2) * scale)) continue;
     M3D R_ref_w = pt->ref_patch->T_f_w_.rotation_matrix();
 
     computeProjectionJacobian(pf, Jdpi);
@@ -1425,6 +1475,8 @@ void VIOManager::updateStateInverse(cv::Mat img, int level)
     if (has_ref_patch_cache == false) precomputeReferencePatches(level);
     int n_meas = 0;
     float error = 0.0;
+    H_sub.setZero();
+    z.setZero();
     M3D Rwi(state->rot_end);
     V3D Pwi(state->pos_end);
     P_wi_hat << SKEW_SYM_MATRX(Pwi);
@@ -1444,7 +1496,9 @@ void VIOManager::updateStateInverse(cv::Mat img, int level)
       if (pt == nullptr) continue;
 
       V3D pf = Rcw * pt->pos_ + Pcw;
+      if (!pf.allFinite() || pf.z() <= 0.0) continue;
       pc = cam->world2cam(pf);
+      if (!pc.allFinite() || !isPixelInside(*cam, pc, (patch_size_half + 2) * scale)) continue;
 
       const float u_ref = pc[0];
       const float v_ref = pc[1];
@@ -1479,6 +1533,7 @@ void VIOManager::updateStateInverse(cv::Mat img, int level)
       error += patch_error;
     }
 
+    if (n_meas == 0) break;
     error = error / n_meas;
 
     compute_jacobian_time += omp_get_wtime() - t1;
@@ -1545,6 +1600,8 @@ void VIOManager::updateState(cv::Mat img, int level)
     
     float error = 0.0;
     int n_meas = 0;
+    H_sub.setZero();
+    z.setZero();
     // int max_threads = omp_get_max_threads();
     // int desired_threads = std::min(max_threads, total_points);
     // omp_set_num_threads(desired_threads);
@@ -1572,6 +1629,8 @@ void VIOManager::updateState(cv::Mat img, int level)
 
       V3D pf = Rcw * pt->pos_ + Pcw;
       V2D pc = cam->world2cam(pf);
+      if (!pf.allFinite() || pf.z() <= 0.0 || !pc.allFinite() ||
+          !isPixelInside(*cam, pc, (patch_size_half + 2) * scale)) continue;
 
       computeProjectionJacobian(pf, Jdpi);
       M3D p_hat;
@@ -1633,6 +1692,7 @@ void VIOManager::updateState(cv::Mat img, int level)
       error += patch_error;
     }
 
+    if (n_meas == 0) break;
     error = error / n_meas;
     
     compute_jacobian_time += omp_get_wtime() - t1;
@@ -1698,6 +1758,7 @@ void VIOManager::updateFrameState(StatesGroup state)
 
 void VIOManager::plotTrackedPoints()
 {
+#ifndef FAST_LIVO2_STANDALONE
   int total_points = visual_submap->voxel_points.size();
   if (total_points == 0) return;
   // int inlier_count = 0;
@@ -1737,6 +1798,7 @@ void VIOManager::plotTrackedPoints()
   // origin.x = img_cp.cols - 110;
   // origin.y = 20;
   // cv::putText(img_cp, text, origin, cv::FONT_HERSHEY_COMPLEX, 0.7, cv::Scalar(0, 255, 0), 2, 8, 0);
+#endif
 }
 
 V3F VIOManager::getInterpolatedPixel(cv::Mat img, V2D pc)
@@ -1761,6 +1823,7 @@ V3F VIOManager::getInterpolatedPixel(cv::Mat img, V2D pc)
 
 void VIOManager::dumpDataForColmap()
 {
+#ifndef FAST_LIVO2_STANDALONE
   static int cnt = 1;
   std::ostringstream ss;
   ss << std::setw(5) << std::setfill('0') << cnt;
@@ -1781,20 +1844,31 @@ void VIOManager::dumpDataForColmap()
             << cnt_str << ".png" << std::endl;
   fout_colmap << "0.0 0.0 -1" << std::endl;
   cnt++;
+#endif
 }
 
 void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &feat_map, double img_time)
 {
+  if (!visual_submap) throw std::logic_error("VIO is not initialized");
+  if (img.empty() || (img.type() != CV_8UC1 && img.type() != CV_8UC3))
+    throw std::invalid_argument("VIO requires an 8-bit grayscale or BGR image");
+#ifdef FAST_LIVO2_STANDALONE
+  if (width != img.cols || height != img.rows)
+    throw std::invalid_argument("VIO image dimensions do not match calibration");
+  img = img.clone();
+#endif
   if (width != img.cols || height != img.rows)
   {
-    if (img.empty()) printf("[ VIO ] Empty Image!\n");
-    cv::resize(img, img, cv::Size(img.cols * image_resize_factor, img.rows * image_resize_factor), 0, 0, CV_INTER_LINEAR);
+    if (img.empty()) VIO_LOG("[ VIO ] Empty Image!\n");
+    cv::resize(img, img, cv::Size(img.cols * image_resize_factor, img.rows * image_resize_factor), 0, 0, cv::INTER_LINEAR);
   }
+#ifndef FAST_LIVO2_STANDALONE
   img_rgb = img.clone();
   img_cp = img.clone();
+#endif
   // img_test = img.clone();
 
-  if (img.channels() == 3) cv::cvtColor(img, img, CV_BGR2GRAY);
+  if (img.channels() == 3) cv::cvtColor(img, img, cv::COLOR_BGR2GRAY);
 
   new_frame_.reset(new Frame(cam, img));
   updateFrameState(*state);
@@ -1815,9 +1889,10 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
 
   double t4 = omp_get_wtime();
   
+#ifndef FAST_LIVO2_STANDALONE
   plotTrackedPoints();
-
   if (plot_flag) projectPatchFromRefToCur(feat_map);
+#endif
 
   double t5 = omp_get_wtime();
 
@@ -1829,7 +1904,9 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
 
   double t7 = omp_get_wtime();
   
-  if(colmap_output_en)  dumpDataForColmap();
+#ifndef FAST_LIVO2_STANDALONE
+  if(colmap_output_en) dumpDataForColmap();
+#endif
 
   frame_count++;
   ave_total = ave_total * (frame_count - 1) / frame_count + (t7 - t1 - (t5 - t4)) / frame_count;
@@ -1848,24 +1925,24 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
   // cout << BLUE << "ave_build_residual_time: " << ave_build_residual_time << RESET << endl;
   // cout << BLUE << "ave_ekf_time: " << ave_ekf_time << RESET << endl;
   
-  printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
-  printf("\033[1;34m|                         VIO Time                            |\033[0m\n");
-  printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
-  printf("\033[1;34m| %-29s | %-27zu |\033[0m\n", "Sparse Map Size", feat_map.size());
-  printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
-  printf("\033[1;34m| %-29s | %-27s |\033[0m\n", "Algorithm Stage", "Time (secs)");
-  printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
-  printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "retrieveFromVisualSparseMap", t2 - t1);
-  printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "computeJacobianAndUpdateEKF", t3 - t2);
-  printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> computeJacobian", compute_jacobian_time);
-  printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> updateEKF", update_ekf_time);
-  printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "generateVisualMapPoints", t4 - t3);
-  printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "updateVisualMapPoints", t6 - t5);
-  printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "updateReferencePatch", t7 - t6);
-  printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
-  printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Current Total Time", t7 - t1 - (t5 - t4));
-  printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Average Total Time", ave_total);
-  printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+  VIO_LOG("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+  VIO_LOG("\033[1;34m|                         VIO Time                            |\033[0m\n");
+  VIO_LOG("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+  VIO_LOG("\033[1;34m| %-29s | %-27zu |\033[0m\n", "Sparse Map Size", feat_map.size());
+  VIO_LOG("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+  VIO_LOG("\033[1;34m| %-29s | %-27s |\033[0m\n", "Algorithm Stage", "Time (secs)");
+  VIO_LOG("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+  VIO_LOG("\033[1;32m| %-29s | %-27lf |\033[0m\n", "retrieveFromVisualSparseMap", t2 - t1);
+  VIO_LOG("\033[1;32m| %-29s | %-27lf |\033[0m\n", "computeJacobianAndUpdateEKF", t3 - t2);
+  VIO_LOG("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> computeJacobian", compute_jacobian_time);
+  VIO_LOG("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> updateEKF", update_ekf_time);
+  VIO_LOG("\033[1;32m| %-29s | %-27lf |\033[0m\n", "generateVisualMapPoints", t4 - t3);
+  VIO_LOG("\033[1;32m| %-29s | %-27lf |\033[0m\n", "updateVisualMapPoints", t6 - t5);
+  VIO_LOG("\033[1;32m| %-29s | %-27lf |\033[0m\n", "updateReferencePatch", t7 - t6);
+  VIO_LOG("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+  VIO_LOG("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Current Total Time", t7 - t1 - (t5 - t4));
+  VIO_LOG("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Average Total Time", ave_total);
+  VIO_LOG("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
 
   // std::string text = std::to_string(int(1 / (t7 - t1 - (t5 - t4)))) + " HZ";
   // cv::Point2f origin;

@@ -1,0 +1,11 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+# Eigen objects and cv::Mat cross the shared-library boundary. Require the
+# selected build versions in consumers as well; keep custom installations
+# selectable via Eigen3_DIR and OpenCV_DIR instead of embedding local paths.
+find_dependency(Eigen3 @FAST_LIVO2_EIGEN_VERSION@ EXACT CONFIG)
+find_dependency(OpenCV @OpenCV_VERSION@ EXACT CONFIG COMPONENTS core)
+
+include("${CMAKE_CURRENT_LIST_DIR}/fast_livo2Targets.cmake")
+check_required_components(fast_livo2)

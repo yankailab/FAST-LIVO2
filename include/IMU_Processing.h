@@ -16,10 +16,13 @@ which is included as part of this source code package.
 #include <Eigen/Eigen>
 #include "common_lib.h"
 #include <condition_variable>
+#ifndef FAST_LIVO2_STANDALONE
 #include <nav_msgs/Odometry.h>
+#endif
 #include <utils/so3_math.h>
 #include <fstream>
-const bool time_list(PointType &x, PointType &y) { return (x.curvature < y.curvature); }
+#include <omp.h>
+inline bool time_list(const PointType &x, const PointType &y) { return (x.curvature < y.curvature); }
 
 /// *************IMU Process and undistortion
 class ImuProcess
@@ -31,7 +34,7 @@ public:
   ~ImuProcess();
 
   void Reset();
-  void Reset(double start_timestamp, const sensor_msgs::ImuConstPtr &lastimu);
+  void Reset(double start_timestamp, const NativeImuConstPtr &lastimu);
   void set_extrinsic(const V3D &transl, const M3D &rot);
   void set_extrinsic(const V3D &transl);
   void set_extrinsic(const MD(4, 4) & T);
@@ -49,7 +52,7 @@ public:
   void UndistortPcl(LidarMeasureGroup &lidar_meas, StatesGroup &state_inout, PointCloudXYZI &pcl_out);
 
   ofstream fout_imu;
-  double IMU_mean_acc_norm;
+  double IMU_mean_acc_norm = 1.0;
   V3D unbiased_gyr;
 
   V3D cov_acc;
@@ -57,18 +60,18 @@ public:
   V3D cov_bias_gyr;
   V3D cov_bias_acc;
   double cov_inv_expo;
-  double first_lidar_time;
+  double first_lidar_time = 0.0;
   bool imu_time_init = false;
   bool imu_need_init = true;
   M3D Eye3d;
   V3D Zero3d;
-  int lidar_type;
+  int lidar_type = AVIA;
 
 private:
   void IMU_init(const MeasureGroup &meas, StatesGroup &state, int &N);
   void Forward_without_imu(LidarMeasureGroup &meas, StatesGroup &state_inout, PointCloudXYZI &pcl_out);
   PointCloudXYZI pcl_wait_proc;
-  sensor_msgs::ImuConstPtr last_imu;
+  NativeImuConstPtr last_imu;
   PointCloudXYZI::Ptr cur_pcl_un_;
   vector<Pose6D> IMUpose;
   M3D Lid_rot_to_IMU;
@@ -77,8 +80,8 @@ private:
   V3D mean_gyr;
   V3D angvel_last;
   V3D acc_s_last;
-  double last_prop_end_time;
-  double time_last_scan;
+  double last_prop_end_time = 0.0;
+  double time_last_scan = 0.0;
   int init_iter_num = 1, MAX_INI_COUNT = 20;
   bool b_first_frame = true;
   bool imu_en = true;

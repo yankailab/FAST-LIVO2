@@ -20,12 +20,14 @@ which is included as part of this source code package.
 #include <mutex>
 #include <omp.h>
 #include <pcl/common/io.h>
+#ifndef FAST_LIVO2_STANDALONE
 #include <ros/ros.h>
+#include <visualization_msgs/Marker.h>
+#include <visualization_msgs/MarkerArray.h>
+#endif
 #include <thread>
 #include <unistd.h>
 #include <unordered_map>
-#include <visualization_msgs/Marker.h>
-#include <visualization_msgs/MarkerArray.h>
 
 #define VOXELMAP_HASH_P 116101
 #define VOXELMAP_MAX_N 10000000000
@@ -59,11 +61,11 @@ typedef struct PointToPlane
   Eigen::Vector3d center_;
   Eigen::Matrix<double, 6, 6> plane_var_;
   M3D body_cov_;
-  int layer_;
-  double d_;
-  double eigen_value_;
-  bool is_valid_;
-  float dis_to_plane_;
+  int layer_ = 0;
+  double d_ = 0;
+  double eigen_value_ = 0;
+  bool is_valid_ = false;
+  float dis_to_plane_ = 0;
 } PointToPlane;
 
 typedef struct VoxelPlane
@@ -132,10 +134,10 @@ class VoxelOctoTree
 public:
   VoxelOctoTree() = default;
   std::vector<pointWithVar> temp_points_;
-  VoxelPlane *plane_ptr_;
+  VoxelPlane *plane_ptr_ = nullptr;
   int layer_;
   int octo_state_; // 0 is end of tree, 1 is not
-  VoxelOctoTree *leaves_[8];
+  VoxelOctoTree *leaves_[8] = {};
   double voxel_center_[3]; // x, y, z
   std::vector<int> layer_init_num_;
   float quater_length_;
@@ -182,36 +184,47 @@ public:
   VoxelOctoTree *Insert(const pointWithVar &pv);
 };
 
+#ifndef FAST_LIVO2_STANDALONE
 void loadVoxelConfig(ros::NodeHandle &nh, VoxelMapConfig &voxel_config);
+#endif
 
 class VoxelMapManager
 {
 public:
   VoxelMapManager() = default;
+#ifdef FAST_LIVO2_STANDALONE
+  ~VoxelMapManager();
+  VoxelMapManager(const VoxelMapManager &) = delete;
+  VoxelMapManager &operator=(const VoxelMapManager &) = delete;
+#endif
   VoxelMapConfig config_setting_;
   int current_frame_id_ = 0;
+#ifndef FAST_LIVO2_STANDALONE
   ros::Publisher voxel_map_pub_;
+#endif
   std::unordered_map<VOXEL_LOCATION, VoxelOctoTree *> voxel_map_;
 
   PointCloudXYZI::Ptr feats_undistort_;
   PointCloudXYZI::Ptr feats_down_body_;
   PointCloudXYZI::Ptr feats_down_world_;
 
-  M3D extR_;
-  V3D extT_;
-  float build_residual_time, ekf_time;
+  M3D extR_ = M3D::Identity();
+  V3D extT_ = V3D::Zero();
+  float build_residual_time = 0.0, ekf_time = 0.0;
   float ave_build_residual_time = 0.0;
   float ave_ekf_time = 0.0;
   int scan_count = 0;
   StatesGroup state_;
-  V3D position_last_;
+  V3D position_last_ = V3D::Zero();
 
   V3D last_slide_position = {0,0,0};
 
+#ifndef FAST_LIVO2_STANDALONE
   geometry_msgs::Quaternion geoQuat_;
+#endif
 
-  int feats_down_size_;
-  int effct_feat_num_;
+  int feats_down_size_ = 0;
+  int effct_feat_num_ = 0;
   std::vector<M3D> cross_mat_list_;
   std::vector<M3D> body_cov_list_;
   std::vector<pointWithVar> pv_list_;
@@ -240,12 +253,15 @@ public:
   void build_single_residual(pointWithVar &pv, const VoxelOctoTree *current_octo, const int current_layer, bool &is_sucess, double &prob,
                              PointToPlane &single_ptpl);
 
+#ifndef FAST_LIVO2_STANDALONE
   void pubVoxelMap();
+#endif
 
   void mapSliding();
   void clearMemOutOfMap(const int& x_max,const int& x_min,const int& y_max,const int& y_min,const int& z_max,const int& z_min );
 
 private:
+#ifndef FAST_LIVO2_STANDALONE
   void GetUpdatePlane(const VoxelOctoTree *current_octo, const int pub_max_voxel_layer, std::vector<VoxelPlane> &plane_list);
 
   void pubSinglePlane(visualization_msgs::MarkerArray &plane_pub, const std::string plane_ns, const VoxelPlane &single_plane, const float alpha,
@@ -253,6 +269,7 @@ private:
   void CalcVectQuation(const Eigen::Vector3d &x_vec, const Eigen::Vector3d &y_vec, const Eigen::Vector3d &z_vec, geometry_msgs::Quaternion &q);
 
   void mapJet(double v, double vmin, double vmax, uint8_t &r, uint8_t &g, uint8_t &b);
+#endif
 };
 typedef std::shared_ptr<VoxelMapManager> VoxelMapManagerPtr;
 

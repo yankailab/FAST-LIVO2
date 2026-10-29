@@ -17,13 +17,28 @@ which is included as part of this source code package.
 #include <utils/types.h>
 #include <utils/color.h>
 #include <opencv2/opencv.hpp>
+#ifdef FAST_LIVO2_STANDALONE
+#include "standalone/geometry.h"
+#include "standalone/imu.h"
+using NativeImu = fast_livo2::detail::Imu;
+using NativeImuConstPtr = fast_livo2::detail::ImuConstPtr;
+#else
 #include <sensor_msgs/Imu.h>
 #include <sophus/se3.h>
 #include <tf/transform_broadcaster.h>
+using NativeImu = sensor_msgs::Imu;
+using NativeImuConstPtr = sensor_msgs::ImuConstPtr;
+#endif
+#include <deque>
+#include <memory>
 
 using namespace std;
 using namespace Eigen;
+#ifdef FAST_LIVO2_STANDALONE
+using fast_livo2::detail::SE3;
+#else
 using namespace Sophus;
+#endif
 
 #define print_line std::cout << __FILE__ << ", " << __LINE__ << std::endl;
 #define G_m_s2 (9.81)   // Gravaty const in GuangDong/China
@@ -63,7 +78,7 @@ struct MeasureGroup
 {
   double vio_time;
   double lio_time;
-  deque<sensor_msgs::Imu::ConstPtr> imu;
+  deque<NativeImuConstPtr> imu;
   cv::Mat img;
   MeasureGroup()
   {

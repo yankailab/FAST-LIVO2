@@ -15,13 +15,17 @@ which is included as part of this source code package.
 
 #include "voxel_map.h"
 #include "feature.h"
-#include <opencv2/imgproc/imgproc_c.h>
+#include <opencv2/imgproc.hpp>
 #include <pcl/filters/voxel_grid.h>
 #include <set>
+#ifdef FAST_LIVO2_STANDALONE
+#include "standalone/vision.h"
+#else
 #include <vikit/math_utils.h>
 #include <vikit/robust_cost.h>
 #include <vikit/vision.h>
 #include <vikit/pinhole_camera.h>
+#endif
 
 struct SubSparseMap
 {
@@ -83,11 +87,11 @@ public:
 class VIOManager
 {
 public:
-  int grid_size;
-  vk::AbstractCamera *cam;
-  vk::PinholeCamera *pinhole_cam;
-  StatesGroup *state;
-  StatesGroup *state_propagat;
+  int grid_size = 5;
+  vk::AbstractCamera *cam = nullptr;
+  vk::PinholeCamera *pinhole_cam = nullptr;
+  StatesGroup *state = nullptr;
+  StatesGroup *state_propagat = nullptr;
   M3D Rli, Rci, Rcl, Rcw, Jdphi_dR, Jdp_dt, Jdp_dR;
   V3D Pli, Pci, Pcl, Pcw;
   vector<int> grid_num;
@@ -97,27 +101,29 @@ public:
   vector<float> map_dist;
   vector<float> scan_value;
   vector<float> patch_buffer;
-  bool normal_en, inverse_composition_en, exposure_estimate_en, raycast_en, has_ref_patch_cache;
+  bool normal_en = true, inverse_composition_en = false, exposure_estimate_en = true,
+       raycast_en = false, has_ref_patch_cache = false;
   bool ncc_en = false, colmap_output_en = false;
 
-  int width, height, grid_n_width, grid_n_height, length;
-  double image_resize_factor;
-  double fx, fy, cx, cy;
-  int patch_pyrimid_level, patch_size, patch_size_total, patch_size_half, border, warp_len;
-  int max_iterations, total_points;
+  int width = 0, height = 0, grid_n_width = 0, grid_n_height = 17, length = 0;
+  double image_resize_factor = 1.0;
+  double fx = 0, fy = 0, cx = 0, cy = 0;
+  int patch_pyrimid_level = 3, patch_size = 8, patch_size_total = 0, patch_size_half = 0,
+      border = 0, warp_len = 0;
+  int max_iterations = 5, total_points = 0;
 
-  double img_point_cov, outlier_threshold, ncc_thre;
+  double img_point_cov = 100.0, outlier_threshold = 1000.0, ncc_thre = 0.6;
   
-  SubSparseMap *visual_submap;
+  SubSparseMap *visual_submap = nullptr;
   std::vector<std::vector<V3D>> rays_with_sample_points;
 
-  double compute_jacobian_time, update_ekf_time;
+  double compute_jacobian_time = 0, update_ekf_time = 0;
   double ave_total = 0;
   // double ave_build_residual_time = 0;
   // double ave_ekf_time = 0;
 
   int frame_count = 0;
-  bool plot_flag;
+  bool plot_flag = false;
 
   Matrix<double, DIM_STATE, DIM_STATE> G, H_T_H;
   MatrixXd K, H_sub_inv;
